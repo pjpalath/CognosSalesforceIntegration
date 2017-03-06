@@ -1,0 +1,347 @@
+/**
+ * 
+ */
+package com.rsc.erp.utils.parse.cognos;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Properties;
+import java.util.Scanner;
+import java.util.logging.FileHandler;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.logging.SimpleFormatter;
+
+/**
+ * @author PAUL
+ *
+ */
+public class SalesforceReport 
+{
+	// Logger
+	private static final Logger LOG = Logger.getLogger(SalesforceReport.class.getName());
+	private Handler logFileHandler;
+
+	// Static final variables
+	private static final String LOG_FILE = "splitFilesProcessing.log";
+	private static final String DATE_REPORT_LAST_UPDATED_CONF_FILE = "reportsLastUpdatedDateProp.conf";
+	private static final String LAST_RUN_DATE_STRING = "lastRunDate";
+
+	// Utility Classes
+	private SplitHtmlReportRegexUtils splitHtmlReportRegexUtils;
+	private SplitHtmlReportDateTimeUtils splitHtmlReportDateTimeUtils;
+	private SplitHtmlReportExceptionHandlingUtils splitHtmlReportExceptionHandlingUtils;
+	private SplitHtmlReportFileHandlingUtils splitHtmlReportFileHandlingUtils;
+	
+	// Scanner
+	private Scanner reportFileScanner;
+
+	// Input report file parsing properties
+	private String cognosReportNamesStartingPrefix;
+	private String cognosReportsRootFolder;	
+	private String regexForSplitting;
+	private String regexForFooter;
+	private String regexForAccountNumber;
+	private String regexForSplittingAccountString;
+	// Number of days of report history to keep
+	private int numOfDaysReportHistory;
+	// Output split files properties
+	private String splitFilesRootFolder;
+	
+	// The properties to add/update
+	private Properties reportLatestUpdatedProps = new Properties();
+
+	/**
+	 * 
+	 */
+	public SalesforceReport() 
+	{
+	}
+
+	/**
+	 * Initialize
+	 * @throws IOException 
+	 * @throws FileNotFoundException 
+	 */
+	private void init(String propertiesFileName, StringBuilder logStringBuilder) throws FileNotFoundException, IOException
+	{
+		logFileHandler = new FileHandler(LOG_FILE, true);
+		logFileHandler.setFormatter(new SimpleFormatter());
+		LOG.addHandler(logFileHandler);
+		LOG.setUseParentHandlers(false);
+
+		logStringBuilder.append("\r\n\r\n*************************************************************************************************\r\n\r\n");
+		logStringBuilder.append("SPLIT COGNOS HTML REPORTS SCRIPT START\r\n");
+		logStringBuilder.append("-------------------------------------\r\n\r\n");			
+		
+		Properties reportFileProperties = new Properties();				
+		reportFileProperties.load(new FileInputStream(propertiesFileName));		
+		cognosReportNamesStartingPrefix = reportFileProperties.getProperty("ReportName");
+		cognosReportsRootFolder = reportFileProperties.getProperty("ReportFilePath");
+		regexForSplitting = reportFileProperties.getProperty("RegularExpressionForSplitting");
+		regexForFooter = reportFileProperties.getProperty("RegularExpressionForFooter");
+		regexForAccountNumber = reportFileProperties.getProperty("RegularExpressionForAccountNumber");
+		regexForSplittingAccountString = reportFileProperties.getProperty("RegularExpressionForSplittingAccountString");
+		numOfDaysReportHistory = Integer.parseInt(reportFileProperties.getProperty("NumOfDaysReportHistory"));
+		splitFilesRootFolder = reportFileProperties.getProperty("SplitFilesRootFolder") + "/" + cognosReportNamesStartingPrefix;
+		// Print out the properties
+		logStringBuilder.append("Property file for this run of the Script is " + propertiesFileName + "\r\n\r\n");
+		logStringBuilder.append("Properties from property file are: " + reportFileProperties.toString() + "\r\n\r\n");
+
+		splitHtmlReportRegexUtils = new SplitHtmlReportRegexUtils(logFileHandler, logStringBuilder);
+		splitHtmlReportDateTimeUtils = new SplitHtmlReportDateTimeUtils(logFileHandler, logStringBuilder);
+		splitHtmlReportExceptionHandlingUtils = new SplitHtmlReportExceptionHandlingUtils(logFileHandler);
+		splitHtmlReportFileHandlingUtils = new SplitHtmlReportFileHandlingUtils(logFileHandler, logStringBuilder);				
+	}
+
+	/**
+	 * Initialize Scanner
+	 * @throws FileNotFoundException
+	 */
+	private void initScanner(String reportFile, StringBuilder logStringBuilder) throws FileNotFoundException
+	{
+		// Initialize scanner
+		reportFileScanner = new Scanner(new File(reportFile));
+		reportFileScanner.useDelimiter(regexForSplitting);
+
+		logStringBuilder.append("Initialized the report file scanner\r\n\r\n");
+	}
+
+	/**
+	 * 
+	 */
+	private void printLogAndCloseLogHandler(StringBuilder logStringBuilder)
+	{
+		logStringBuilder.append("\r\n\r\nClosed the log file handler\r\n\r\n");
+		logStringBuilder.append("SPLIT COGNOS HTML REPORTS SCRIPT END\r\n");
+		logStringBuilder.append("------------------------------------\r\n\r\n");
+		logStringBuilder.append("******************************************************************************************"
+				+ "*******\r\n\r\n\r\n\r\n\r\n\r\n");		
+		LOG.info(logStringBuilder.toString());
+		logFileHandler.close();
+	}
+
+	/**
+	 * Split Report
+	 * @throws Exception 
+	 */
+	private void splitReport(String propertiesFileName) throws Exception
+	{
+		// Log StringBuilder
+		StringBuilder logStringBuilder = new StringBuilder();
+		
+		// Initialize from properties file
+		try 
+		{
+			init(propertiesFileName, logStringBuilder);
+		} 
+		catch (FileNotFoundException e) 
+		{
+			LOG.log(Level.SEVERE, "Could not find properties file " + propertiesFileName + " for splitting the report "
+					+ "file. Please run the program with the right value for the properties "
+					+ "file path.");
+			throw e;
+		} 
+		catch (IOException e) 
+		{
+			LOG.log(Level.SEVERE, "");
+			throw e;
+		}		
+
+		// Delete split files older than a certain number of days
+		splitHtmlReportFileHandlingUtils.deletePastHistory(splitFilesRootFolder, numOfDaysReportHistory);
+
+		// Set the report file (A report file could come in many parts with different
+		// ending names)
+		File multipleReportFilesFolder = new File(cognosReportsRootFolder);
+		if (!multipleReportFilesFolder.isDirectory())
+		{
+			LOG.log(Level.SEVERE, "The reports folder path " + cognosReportsRootFolder + " defined in the properties file "
+					+ "is not a directory. Please correct it and rerun the script");
+			throw new Exception();
+		}
+		else
+		{
+			// Create the folder that will contain the split files
+			if (splitHtmlReportFileHandlingUtils.isReportFileAvailabe(cognosReportsRootFolder, cognosReportNamesStartingPrefix))
+			{
+				// Go through the report folder and pick out all the report files that
+				// start with the report name. So you are merging the results from the
+				// splitting of these report files into the same folder
+				boolean alreadyHandledCurrentFolder = false;
+				String newSplitReportsFolder = splitHtmlReportFileHandlingUtils.createSubFolderForSplitFiles(splitFilesRootFolder);
+				for (File multipleReportFile : multipleReportFilesFolder.listFiles())
+				{
+					// If this file is of this report type (file name starts with report name type)
+					if (multipleReportFile.getName().startsWith(cognosReportNamesStartingPrefix))
+					{
+						String cognosReportName = multipleReportFile.getName();
+						String cognosReportFilePath = cognosReportsRootFolder + "/" + cognosReportName;
+
+						logStringBuilder.append("\r\n\r\n----------------------------------------------------------\r\n");
+						logStringBuilder.append("Starting processing of cognos report file " + cognosReportName + "\r\n\r\n");
+						
+						if (splitHtmlReportDateTimeUtils.isReportFileNewer(cognosReportFilePath, 
+								cognosReportName, DATE_REPORT_LAST_UPDATED_CONF_FILE, reportLatestUpdatedProps))
+						{							
+							File currentSplitFolder = new File(
+									splitHtmlReportFileHandlingUtils.getCurrentSplitFilesFolder(splitFilesRootFolder));
+							File todaysZeroSplitFolder = new File(
+									splitHtmlReportFileHandlingUtils.getTodayZeroSplitFilesFolder(splitFilesRootFolder));
+							String lastRunScriptDateForThisReport = reportLatestUpdatedProps.getProperty(
+									LAST_RUN_DATE_STRING + cognosReportNamesStartingPrefix);
+							if (splitHtmlReportDateTimeUtils.isFirstRunForTheDay(lastRunScriptDateForThisReport) && !alreadyHandledCurrentFolder)
+							{
+								// Create the current folder. If it exists delete it and recreate it.								
+								if (currentSplitFolder.exists())
+								{
+									splitHtmlReportFileHandlingUtils.invokeDelete(
+											splitHtmlReportFileHandlingUtils.getCurrentSplitFilesFolder(splitFilesRootFolder));
+								}
+								currentSplitFolder.mkdirs();
+								// Create the zero date sub folder. If it exists delete it and recreate it.
+								if (todaysZeroSplitFolder.exists())
+								{
+									splitHtmlReportFileHandlingUtils.invokeDelete(
+											splitHtmlReportFileHandlingUtils.getTodayZeroSplitFilesFolder(splitFilesRootFolder));
+								}
+								todaysZeroSplitFolder.mkdirs();
+								try 
+								{
+									SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+									lastRunScriptDateForThisReport = sdf.format(new Date());
+									splitHtmlReportExceptionHandlingUtils.exceptionHandlingForUpdatedProps(reportLatestUpdatedProps, 
+											LAST_RUN_DATE_STRING + cognosReportNamesStartingPrefix, lastRunScriptDateForThisReport,
+											DATE_REPORT_LAST_UPDATED_CONF_FILE);
+								} catch (Exception e) 
+								{
+									LOG.log(Level.SEVERE, e.getMessage());
+								}
+							}
+							// Create the date sub folder							
+							alreadyHandledCurrentFolder = true;							
+
+							initScanner(cognosReportFilePath, logStringBuilder);
+							// The first line is the header. Get it first.
+							if (reportFileScanner.hasNext())
+							{
+								// Header
+								String header = reportFileScanner.next();
+
+								// Now get the footer - text after all the splits
+								String lastLine = "";
+								while (reportFileScanner.hasNext())
+								{
+									lastLine = reportFileScanner.next();				
+								}
+								String footer = splitHtmlReportRegexUtils.getFooter(lastLine, regexForFooter);
+								splitHtmlReportRegexUtils.closeFileScannerHandler(reportFileScanner);
+
+								// Reinit the scanner to start from the beginning of the text
+								try 
+								{
+									initScanner(cognosReportFilePath, logStringBuilder);
+								} 
+								catch (FileNotFoundException e) 
+								{
+									LOG.log(Level.SEVERE, "");
+									throw e;
+								}
+								
+								// Skip the header part as we have already extracted it
+								reportFileScanner.next();
+								// For each split line add the header and footer to it
+								while (reportFileScanner.hasNext())
+								{			
+									String splitFileString = header + "<table xmlns" + reportFileScanner.next();
+									if (reportFileScanner.hasNext())
+									{
+										splitFileString = splitFileString + footer;
+									}
+
+									// Get the account string for this split file
+									String accountString = splitHtmlReportRegexUtils.findAccountFromSplitFileString(splitFileString,
+											regexForAccountNumber, regexForSplittingAccountString);
+
+									// Create and store the split file
+									try 
+									{
+										// Create the split file in todays run counter folder and write the split string to it
+										splitHtmlReportFileHandlingUtils.createFileAndWriteSplitString(accountString, 
+												newSplitReportsFolder, splitFileString);
+										// Create the split file in the current folder and write the split string to it					
+										splitHtmlReportFileHandlingUtils.createFileAndWriteSplitString(accountString, 
+												splitHtmlReportFileHandlingUtils.getCurrentSplitFilesFolder(splitFilesRootFolder), 
+												splitFileString);
+										// Create the split file in the zero folder and write the split string to it
+										splitHtmlReportFileHandlingUtils.createFileAndWriteSplitString(accountString, 
+												splitHtmlReportFileHandlingUtils.getTodayZeroSplitFilesFolder(splitFilesRootFolder), 
+												splitFileString);
+									} 
+									catch (IOException e) 
+									{
+										LOG.log(Level.SEVERE, "");
+										throw e;
+									}
+								}
+							}							
+
+							splitHtmlReportRegexUtils.closeFileScannerHandler(reportFileScanner);
+						}
+						else
+						{
+							logStringBuilder.append("Report file " + cognosReportName + " is not newer than the last time it was modified. "
+									+ "Hence it will not be processed\r\n\r\n");
+						}
+						
+						logStringBuilder.append("Ended processing of cognos report file " + cognosReportName + "\r\n");
+						logStringBuilder.append("----------------------------------------------------------\r\n\r\n");
+					}
+				}
+			}
+			else
+			{
+				logStringBuilder.append("There are no report files with these properties to process " + "\r\n\r\n");
+			}
+		}
+		
+		printLogAndCloseLogHandler(logStringBuilder);
+	}
+
+	/**
+	 * @param args
+	 * @throws IOException 
+	 */
+	public static void main(String[] args) throws IOException 
+	{											
+		if (args.length != 1)
+		{
+			System.out.println("Usage: java - jar SalesforceReport <Property File Name> \n"
+					+ "The property file name contains the properties specific to a particular report type.");
+		}
+
+		File propertyFile = new File(args[0]);
+		if (!propertyFile.exists())
+		{
+			System.out.println("Could not find properties file for splitting the report "
+					+ "file. Please run the program with the right value for the properties "
+					+ "file path.");
+		}
+		
+		SalesforceReport salesForceReport = new SalesforceReport();
+		try
+		{
+			salesForceReport.splitReport(args[0]);
+		} 
+		catch (Exception e)
+		{
+			e.printStackTrace();
+		}
+	}
+
+}
